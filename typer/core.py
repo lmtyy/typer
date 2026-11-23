@@ -25,7 +25,7 @@ from ._coercion import (
 )
 from ._display import describe_number_range
 from ._param_types import choice_as_str, normalize_choice_value
-from ._typing import Literal
+from ._typing import Literal, strip_annotated
 from .exceptions import Abort, Exit
 from .utils import parse_boolean_env_var
 
@@ -193,7 +193,10 @@ class _TyperParameter(_click.core.Parameter):
         elif desc.is_list:
             label = self.bare_type()
         elif desc.is_tuple:
-            labels = [self._bare_type(arg) for arg in get_args(desc.annotation)]
+            labels = [
+                self._bare_type(arg)
+                for arg in get_args(strip_annotated(desc.annotation))
+            ]
             label = ",".join(labels)
         elif desc.is_datetime:
             formats = desc.parameter_info.formats
@@ -216,7 +219,8 @@ class _TyperParameter(_click.core.Parameter):
         annotation = self.type_descriptor.annotation
         return self._bare_type(annotation)
 
-    def _bare_type(self, annotation: type) -> str:
+    def _bare_type(self, annotation: Any) -> str:
+        annotation = strip_annotated(annotation)
         display_type = str(annotation)
         origin = get_origin(annotation)
         if origin is list:

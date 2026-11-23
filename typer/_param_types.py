@@ -24,6 +24,9 @@ from ._typing import (
     is_number_type,
     is_union,
     literal_values,
+    strip_annotated,
+    unwrap_annotated,
+    wrap_annotated,
 )
 from .models import (
     AnyType,
@@ -48,14 +51,15 @@ def lenient_issubclass(cls: Any, class_or_tuple: AnyType | tuple[AnyType, ...]) 
 
 def validate_annotation_structure(annotation: Any) -> None:
     """Raise on invalid nested CLI annotations (developer errors)."""
-    origin = get_origin(annotation)
+    base = strip_annotated(annotation)
+    origin = get_origin(base)
     if origin is list:
-        args = get_args(annotation)
+        args = get_args(base)
         if len(args) != 1:
             raise ValueError(f"Expected one list item type, got: {args!r}")
         validate_annotation_structure(args[0])
     elif origin is tuple:
-        for item_type in get_args(annotation):
+        for item_type in get_args(base):
             validate_annotation_structure(item_type)
 
 
@@ -89,7 +93,7 @@ def parse_param_annotation(
 ) -> ParameterAnnotation:
     """Parse the annotation for a callback parameter."""
     if param.annotation is not param.empty:
-        main_type = param.annotation
+        main_type, outer_meta = unwrap_annotated(param.annotation)
         origin = get_origin(main_type)
 
         if origin is not None:
@@ -100,24 +104,26 @@ def parse_param_annotation(
                         continue
                     types.append(type_)
                 assert len(types) == 1, "Typer currently doesn't support Union types"
-                main_type = types[0]
+                inner_base, inner_meta = unwrap_annotated(types[0])
+                main_type = inner_base
+                outer_meta = (*inner_meta, *outer_meta)
                 origin = get_origin(main_type)
 
             if lenient_issubclass(origin, list):
-                element_type = get_args(main_type)[0]
+                element_type = strip_annotated(get_args(main_type)[0])
                 assert not get_origin(element_type), (
                     "List types with complex sub-types are not currently supported"
                 )
-                return main_type
+                return wrap_annotated(main_type, outer_meta)
             if lenient_issubclass(origin, tuple):
                 type_args = get_args(main_type)
                 for type_ in type_args:
-                    assert not get_origin(type_), (
+                    assert not get_origin(strip_annotated(type_)), (
                         "Tuple types with complex sub-types are not currently supported"
                     )
-                return main_type
-            return main_type
-        return main_type
+                return wrap_annotated(main_type, outer_meta)
+            return wrap_annotated(main_type, outer_meta)
+        return wrap_annotated(main_type, outer_meta)
     return infer_annotation_from_default(default)
 
 
@@ -159,10 +165,11 @@ def choice_coercion_annotation(
     annotation: Any,
     parameter_info: ParameterInfo,
 ) -> tuple[tuple[Any, ...], bool] | None:
-    if lenient_issubclass(annotation, Enum):
-        return tuple(annotation), parameter_info.case_sensitive
-    if is_literal_type(annotation):
-        return literal_values(annotation), parameter_info.case_sensitive
+    base = strip_annotated(annotation)
+    if lenient_issubclass(base, Enum):
+        return tuple(base), parameter_info.case_sensitive
+    if is_literal_type(base):
+        return literal_values(base), parameter_info.case_sensitive
     return None
 
 
@@ -177,11 +184,12 @@ def routes_to_path(annotation: Any, parameter_info: ParameterInfo) -> bool:
     """Defined as such for bwd-compat behaviour"""
     if parameter_info.parser is not None:
         return False
-    if get_origin(annotation) is not None:
+    base = strip_annotated(annotation)
+    if get_origin(base) is not None:
         return False
-    if lenient_issubclass(annotation, Path):
+    if lenient_issubclass(base, Path):
         return True
-    if annotation in (str, bool, datetime, UUID) or is_number_type(annotation):
+    if base in (str, bool, datetime, UUID) or is_number_type(base):
         return False
     return _path_options_requested(parameter_info)
 
@@ -281,24 +289,27 @@ CLI_FILE_TYPES = (FileTextWrite, FileText, FileBinaryRead, FileBinaryWrite)
 
 
 def is_file_annotation(annotation: Any) -> bool:
-    return lenient_issubclass(annotation, CLI_FILE_TYPES)
+    return lenient_issubclass(strip_annotated(annotation), CLI_FILE_TYPES)
 
 
 def file_coercion_annotation(annotation: Any) -> Any | None:
     """Return the file marker type when this parameter opens files."""
-    origin = get_origin(annotation)
+    base = strip_annotated(annotation)
+    origin = get_origin(base)
     if origin is list:
-        args = get_args(annotation)
+        args = get_args(base)
         if args and all(is_file_annotation(arg) for arg in args):
-            return args[0]
+            return strip_annotated(args[0])
         return None
     if origin is tuple:
-        args = get_args(annotation)
+        args = get_args(base)
         if args and any(is_file_annotation(arg) for arg in args):
-            return args
+            return tuple(
+                strip_annotated(arg) if is_file_annotation(arg) else arg for arg in args
+            )
         return None
-    if is_file_annotation(annotation):
-        return annotation
+    if is_file_annotation(base):
+        return base
     return None
 
 

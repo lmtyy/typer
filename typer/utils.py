@@ -3,7 +3,7 @@ from collections.abc import Callable
 from copy import copy
 from typing import Any, cast
 
-from ._typing import Annotated, get_args, get_origin, get_type_hints
+from ._typing import Annotated, get_args, get_origin, get_type_hints, wrap_annotated
 from .models import ArgumentInfo, OptionInfo, ParameterInfo, ParamMeta
 
 
@@ -97,16 +97,24 @@ def _split_annotation_from_typer_annotations(
     if get_origin(base_annotation) is not Annotated:
         return base_annotation, []
     base_annotation, *maybe_typer_annotations = get_args(base_annotation)
-    return base_annotation, [
-        annotation
-        for annotation in maybe_typer_annotations
-        if isinstance(annotation, ParameterInfo)
-    ]
+    typer_annotations: list[ParameterInfo] = []
+    other_annotations: list[Any] = []
+    for annotation in maybe_typer_annotations:
+        if isinstance(annotation, ParameterInfo):
+            typer_annotations.append(annotation)
+        else:
+            other_annotations.append(annotation)
+    if other_annotations:
+        return (
+            wrap_annotated(base_annotation, tuple(other_annotations)),
+            typer_annotations,
+        )
+    return base_annotation, typer_annotations
 
 
 def get_params_from_function(func: Callable[..., Any]) -> dict[str, ParamMeta]:
     signature = inspect.signature(func, eval_str=True)
-    type_hints = get_type_hints(func)
+    type_hints = get_type_hints(func, include_extras=True)
     params = {}
     for param in signature.parameters.values():
         annotation, typer_annotations = _split_annotation_from_typer_annotations(

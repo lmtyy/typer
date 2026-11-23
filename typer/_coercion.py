@@ -21,7 +21,7 @@ from ._param_types import (
     routes_to_path,
     validate_annotation_structure,
 )
-from ._typing import get_args, get_origin, is_number_type
+from ._typing import get_args, get_origin, is_number_type, strip_annotated
 from .models import OptionInfo, ParameterInfo
 
 if TYPE_CHECKING:
@@ -37,23 +37,27 @@ class TypeDescriptor:
     file_annotation: Any | None
 
     @property
+    def _base_annotation(self) -> Any:
+        return strip_annotated(self.annotation)
+
+    @property
     def is_list(self) -> bool:
-        return lenient_issubclass(get_origin(self.annotation), list)
+        return lenient_issubclass(get_origin(self._base_annotation), list)
 
     @property
     def is_tuple(self) -> bool:
-        return lenient_issubclass(get_origin(self.annotation), tuple)
+        return lenient_issubclass(get_origin(self._base_annotation), tuple)
 
     @property
     def is_datetime(self) -> bool:
-        return self.annotation is datetime
+        return self._base_annotation is datetime
 
     @property
     def is_ranged(self) -> bool:
         has_min_or_max = (
             self.parameter_info.min is not None or self.parameter_info.max is not None
         )
-        return is_number_type(self.annotation) and has_min_or_max
+        return is_number_type(self._base_annotation) and has_min_or_max
 
     @property
     def is_path(self) -> bool:
@@ -74,7 +78,7 @@ class TypeDescriptor:
     @property
     def choices(self) -> tuple[Any, ...] | None:
         if self.is_list:
-            args = get_args(self.annotation)
+            args = get_args(self._base_annotation)
             if len(args) == 1:
                 choice = choice_coercion_annotation(args[0], self.parameter_info)
                 if choice is not None:
@@ -90,21 +94,22 @@ class TypeDescriptor:
 
     @property
     def ranged_type_name(self) -> str:
-        assert isinstance(self.annotation, type)
-        return self.annotation.__name__
+        base = self._base_annotation
+        assert isinstance(base, type)
+        return base.__name__
 
     @property
     def tuple_arity(self) -> int | None:
         if not self.is_tuple:
             return None
-        return len(get_args(self.annotation))
+        return len(get_args(self._base_annotation))
 
     @property
     def envvar_list_splitter(self) -> str | None:
         if self.is_file or self.is_path:
             return os.path.pathsep
         if self.is_list:
-            args = get_args(self.annotation)
+            args = get_args(self._base_annotation)
             if len(args) == 1 and (
                 is_file_annotation(args[0])
                 or routes_to_path(args[0], self.parameter_info)
@@ -219,7 +224,7 @@ class PassThroughRuntimeParam(RuntimeParam):
     """Coercion for annotations that cannot use a Pydantic TypeAdapter."""
 
     def _coerce_value(self, value: Any, param: "_TyperParameter", ctx: Context) -> Any:
-        annotation = self.annotation
+        annotation = strip_annotated(self.annotation)
         if isinstance(annotation, type):
             if isinstance(value, annotation):
                 return value

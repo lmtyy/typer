@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, get_args, get_origin
+from typing import TYPE_CHECKING, Any, get_args, get_origin
 
 from pydantic import AfterValidator, BeforeValidator, Field, TypeAdapter, ValidationInfo
 from pydantic.errors import PydanticSchemaGenerationError
@@ -18,7 +18,13 @@ from ._param_types import (
     routes_to_path,
     validate_annotation_structure,
 )
-from ._typing import is_literal_type, is_number_type, literal_values
+from ._typing import (
+    is_literal_type,
+    is_number_type,
+    literal_values,
+    unwrap_annotated,
+    wrap_annotated,
+)
 from .models import ParameterInfo
 
 if TYPE_CHECKING:
@@ -75,10 +81,11 @@ def build_adapter(annotation: Any, parameter_info: ParameterInfo) -> TypeAdapter
     Check for list/tuple and call this function recursively.
     Otherwise, delegate to build_leaf_adapter.
     """
-    origin = get_origin(annotation)
+    base, metadata = unwrap_annotated(annotation)
+    origin = get_origin(base)
     if origin is list:
         validate_annotation_structure(annotation)
-        list_type = get_args(annotation)[0]
+        list_type = get_args(base)[0]
         adapter = build_adapter(list_type, parameter_info)
 
         def parse_list(value: Any, info: ValidationInfo) -> list[Any]:
@@ -87,10 +94,12 @@ def build_adapter(annotation: Any, parameter_info: ParameterInfo) -> TypeAdapter
             context = info.context
             return [adapter.validate_python(item, context=context) for item in value]
 
-        return TypeAdapter(Annotated[list[Any], BeforeValidator(parse_list)])
+        return TypeAdapter(
+            wrap_annotated(list[Any], (*metadata, BeforeValidator(parse_list)))
+        )
 
     if origin is tuple:
-        types = get_args(annotation)
+        types = get_args(base)
         adapters = [build_adapter(t, parameter_info) for t in types]
 
         def parse_tuple(value: Any, info: ValidationInfo) -> tuple[Any, ...]:
@@ -106,7 +115,9 @@ def build_adapter(annotation: Any, parameter_info: ParameterInfo) -> TypeAdapter
                 for adapter, item in zip(adapters, value, strict=False)
             )
 
-        return TypeAdapter(Annotated[tuple[Any, ...], BeforeValidator(parse_tuple)])
+        return TypeAdapter(
+            wrap_annotated(tuple[Any, ...], (*metadata, BeforeValidator(parse_tuple)))
+        )
 
     return build_leaf_adapter(annotation, parameter_info=parameter_info)
 
@@ -115,6 +126,7 @@ def build_leaf_adapter(
     annotation: Any, parameter_info: ParameterInfo
 ) -> TypeAdapter[Any]:
     """Build a Pydantic TypeAdapter for a leaf CLI annotation and constraints."""
+    base, metadata = unwrap_annotated(annotation)
     if parameter_info.parser is not None:
         parser = parameter_info.parser
 
@@ -122,50 +134,59 @@ def build_leaf_adapter(
         def parse(value: Any) -> Any:
             return parser(value)
 
-        return TypeAdapter(Annotated[Any, BeforeValidator(parse)])
+        return TypeAdapter(wrap_annotated(Any, (*metadata, BeforeValidator(parse))))
 
-    if lenient_issubclass(annotation, Enum):
+    if lenient_issubclass(base, Enum):
         case_sensitive = parameter_info.case_sensitive
         return _build_choice_adapter(
-            list(annotation),
+            list(base),
             case_sensitive=case_sensitive,
+            metadata=metadata,
         )
 
-    if is_literal_type(annotation):
+    if is_literal_type(base):
         case_sensitive = parameter_info.case_sensitive
         return _build_choice_adapter(
-            literal_values(annotation),
+            literal_values(base),
             case_sensitive=case_sensitive,
+            metadata=metadata,
         )
 
-    if annotation is datetime:
-        return _build_datetime_adapter(parameter_info.formats)
+    if base is datetime:
+        return _build_datetime_adapter(parameter_info.formats, metadata=metadata)
 
-    if is_number_type(annotation):
+    if is_number_type(base):
         return _build_number_adapter(
-            annotation,
+            base,
             min=parameter_info.min,
             max=parameter_info.max,
             clamp=parameter_info.clamp,
+            metadata=metadata,
         )
 
-    if annotation is bool:
-        return TypeAdapter(Annotated[bool, BeforeValidator(_parse_cli_bool)])
+    if base is bool:
+        return TypeAdapter(
+            wrap_annotated(bool, (*metadata, BeforeValidator(_parse_cli_bool)))
+        )
 
-    if annotation is str:
-        return TypeAdapter(Annotated[str, BeforeValidator(_parse_cli_str)])
+    if base is str:
+        return TypeAdapter(
+            wrap_annotated(str, (*metadata, BeforeValidator(_parse_cli_str)))
+        )
 
     # After concrete types: Path, or any fall-through type with path flags
     if routes_to_path(annotation, parameter_info):
-        return _build_path_adapter(annotation, parameter_info)
+        return _build_path_adapter(base, parameter_info, metadata=metadata)
 
     return TypeAdapter(annotation)
 
 
 # DATE #
-def _build_datetime_adapter(formats: Sequence[str] | None) -> TypeAdapter[datetime]:
+def _build_datetime_adapter(
+    formats: Sequence[str] | None, *, metadata: tuple[Any, ...] = ()
+) -> TypeAdapter[datetime]:
     if formats is None:
-        return TypeAdapter(datetime)
+        return TypeAdapter(wrap_annotated(datetime, metadata))
 
     def parse_datetime(value: Any) -> datetime:
         if isinstance(value, datetime):
@@ -178,7 +199,9 @@ def _build_datetime_adapter(formats: Sequence[str] | None) -> TypeAdapter[dateti
         formats_str = ", ".join(map(repr, formats))
         raise ValueError(f"{value!r} does not match the formats {formats_str}.")
 
-    return TypeAdapter(Annotated[datetime, BeforeValidator(parse_datetime)])
+    return TypeAdapter(
+        wrap_annotated(datetime, (*metadata, BeforeValidator(parse_datetime)))
+    )
 
 
 # STRING / BYTES #
@@ -214,7 +237,12 @@ def _parse_cli_bool(value: Any) -> Any:
 
 # NUMBER #
 def _build_number_adapter(
-    number_class: type[Any], *, min: float | None, max: float | None, clamp: bool | None
+    number_class: type[Any],
+    *,
+    min: float | None,
+    max: float | None,
+    clamp: bool | None,
+    metadata: tuple[Any, ...] = (),
 ) -> TypeAdapter[Any]:
     if clamp:
 
@@ -226,7 +254,9 @@ def _build_number_adapter(
             return value
 
         # Use AfterValidator so it runs after coercion
-        clamped_type: Any = Annotated[number_class, AfterValidator(clamp_number)]  # ty: ignore[invalid-type-form]
+        clamped_type: Any = wrap_annotated(
+            number_class, (AfterValidator(clamp_number), *metadata)
+        )
         return TypeAdapter(clamped_type)
     else:
         field_kwargs: dict[str, Any] = {}
@@ -235,9 +265,11 @@ def _build_number_adapter(
         if max is not None:
             field_kwargs["le"] = max
         if field_kwargs:
-            constrained_type: Any = Annotated[number_class, Field(**field_kwargs)]  # ty: ignore[invalid-type-form]
+            constrained_type: Any = wrap_annotated(
+                number_class, (*metadata, Field(**field_kwargs))
+            )
             return TypeAdapter(constrained_type)
-        return TypeAdapter(number_class)
+        return TypeAdapter(wrap_annotated(number_class, metadata))
 
 
 # CHOICE #
@@ -245,6 +277,7 @@ def _build_choice_adapter(
     choices: Sequence[Any],
     *,
     case_sensitive: bool,
+    metadata: tuple[Any, ...] = (),
 ) -> TypeAdapter[Any]:
     def parse_choice(value: Any, info: ValidationInfo) -> Any:
         ctx, _ = validation_ctx_param(info)
@@ -255,13 +288,15 @@ def _build_choice_adapter(
             ctx=ctx,
         )
 
-    return TypeAdapter(Annotated[Any, BeforeValidator(parse_choice)])
+    return TypeAdapter(wrap_annotated(Any, (*metadata, BeforeValidator(parse_choice))))
 
 
 # PATH #
 def _build_path_adapter(
     annotation: Any,
     parameter_info: ParameterInfo,
+    *,
+    metadata: tuple[Any, ...] = (),
 ) -> TypeAdapter[Any]:
     path_type = parameter_info.path_type
     if path_type is None and lenient_issubclass(annotation, Path):
@@ -277,4 +312,4 @@ def _build_path_adapter(
             ctx=ctx,
         )
 
-    return TypeAdapter(Annotated[Any, BeforeValidator(parse_path)])
+    return TypeAdapter(wrap_annotated(Any, (*metadata, BeforeValidator(parse_path))))

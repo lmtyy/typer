@@ -27,6 +27,9 @@ __all__ = (
     "all_literal_values",
     "is_number_type",
     "is_union",
+    "unwrap_annotated",
+    "strip_annotated",
+    "wrap_annotated",
     "Annotated",
     "Literal",
     "get_args",
@@ -80,3 +83,20 @@ def all_literal_values(type_: type[Any]) -> tuple[Any, ...]:
 
     values = literal_values(type_)
     return tuple(x for value in values for x in all_literal_values(value))
+
+
+def unwrap_annotated(annotation: Any) -> tuple[Any, tuple[Any, ...]]:
+    if get_origin(annotation) is Annotated:
+        args = get_args(annotation)
+        return args[0], args[1:]
+    return annotation, ()
+
+
+def strip_annotated(annotation: Any) -> Any:
+    return unwrap_annotated(annotation)[0]
+
+
+def wrap_annotated(base: Any, metadata: tuple[Any, ...]) -> Any:
+    if not metadata:
+        return base
+    return Annotated[(base, *metadata)]

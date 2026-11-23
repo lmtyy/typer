@@ -17,7 +17,7 @@ from . import _click
 from ._click.globals import get_current_context
 from ._coercion import resolve_type_descriptor
 from ._param_types import lenient_issubclass, parse_param_annotation
-from ._typing import get_args, get_origin
+from ._typing import get_args, get_origin, strip_annotated
 from .completion import get_completion_inspect_parameters
 from .core import (
     DEFAULT_MARKUP_MODE,
@@ -1357,7 +1357,7 @@ def _get_params_name_from_function(
     if callback:
         parameters = get_params_from_function(callback)
         for param_name, param in parameters.items():
-            if lenient_issubclass(param.annotation, _click.Context):
+            if lenient_issubclass(strip_annotated(param.annotation), _click.Context):
                 context_param_name = param_name
                 continue
             params.append(_get_param(param))
@@ -1465,15 +1465,17 @@ def _get_param(param: ParamMeta) -> TyperArgument | TyperOption:
         parameter_info = OptionInfo()
 
     annotation = parse_param_annotation(param, default_value)
-    annotation_args = get_args(annotation)
-    is_list = lenient_issubclass(get_origin(annotation), list)
+    base_annotation = strip_annotated(annotation)
+    annotation_args = get_args(base_annotation)
+    is_list = lenient_issubclass(get_origin(base_annotation), list)
     is_flag = None
     if isinstance(parameter_info, OptionInfo):
-        if annotation is bool:
+        if base_annotation is bool:
             is_flag = True
         elif (
             is_list
-            and annotation_args == (bool,)
+            and len(annotation_args) == 1
+            and strip_annotated(annotation_args[0]) is bool
             and parameter_info.param_decls
             and any("/" in decl for decl in parameter_info.param_decls)
         ):
@@ -1578,9 +1580,10 @@ def get_param_callback(
     value_name = None
     untyped_names: list[str] = []
     for param_name, param_sig in parameters.items():
-        if lenient_issubclass(param_sig.annotation, _click.Context):
+        annotation = strip_annotated(param_sig.annotation)
+        if lenient_issubclass(annotation, _click.Context):
             ctx_name = param_name
-        elif lenient_issubclass(param_sig.annotation, _click.Parameter):
+        elif lenient_issubclass(annotation, _click.Parameter):
             param_arg_name = param_name
         else:
             untyped_names.append(param_name)
@@ -1624,14 +1627,15 @@ def get_param_completion(
     incomplete_name = None
     unassigned_params = list(parameters.values())
     for param_sig in unassigned_params[:]:
-        origin = get_origin(param_sig.annotation)
-        if lenient_issubclass(param_sig.annotation, _click.Context):
+        annotation = strip_annotated(param_sig.annotation)
+        origin = get_origin(annotation)
+        if lenient_issubclass(annotation, _click.Context):
             ctx_name = param_sig.name
             unassigned_params.remove(param_sig)
         elif lenient_issubclass(origin, list):
             args_name = param_sig.name
             unassigned_params.remove(param_sig)
-        elif lenient_issubclass(param_sig.annotation, str):
+        elif lenient_issubclass(annotation, str):
             incomplete_name = param_sig.name
             unassigned_params.remove(param_sig)
     # If there are still unassigned parameters (not typed), extract by name
